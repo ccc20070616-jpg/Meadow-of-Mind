@@ -24,5 +24,6 @@ export enum AppStatus {
   LOADING = 'LOADING',
   READY = 'READY',
   RUNNING = 'RUNNING',
+  PAUSED = 'PAUSED',
   ERROR = 'ERROR'
 }

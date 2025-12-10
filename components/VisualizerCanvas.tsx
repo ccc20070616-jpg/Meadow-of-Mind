@@ -5,9 +5,10 @@ import { SystemState } from '../types';
 
 interface VisualizerCanvasProps {
   systemStateRef: React.MutableRefObject<SystemState>;
+  isPaused: boolean;
 }
 
-const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef }) => {
+const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isPaused }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -15,6 +16,13 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef }) =
   const sphereRef = useRef<THREE.Mesh | null>(null);
   const particlesRef = useRef<THREE.Points | null>(null);
   const frameIdRef = useRef<number>(0);
+  
+  // Ref to track pause state inside the animation closure
+  const isPausedRef = useRef(isPaused);
+
+  useEffect(() => {
+    isPausedRef.current = isPaused;
+  }, [isPaused]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -122,6 +130,14 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef }) =
     // --- Animation Loop ---
     const animate = () => {
       frameIdRef.current = requestAnimationFrame(animate);
+      
+      // If paused, just render the static scene without updating logic
+      if (isPausedRef.current) {
+        if (rendererRef.current && sceneRef.current && cameraRef.current) {
+           rendererRef.current.render(sceneRef.current, cameraRef.current);
+        }
+        return;
+      }
 
       const state = systemStateRef.current;
       const { isHappy, soundAmplitude, soundFrequency } = state;
@@ -159,9 +175,9 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef }) =
         const colors = particlesRef.current.geometry.attributes.color.array as Float32Array;
         const count = CONFIG.particleCount;
         
-        const time = Date.now() * 0.001;
-        const waveAmp = 20 + (soundAmplitude * 80);
-        const waveFreq = 1 + (soundFrequency * 5);
+        // const time = Date.now() * 0.001; // Unused for now
+        // const waveAmp = 20 + (soundAmplitude * 80); // Unused for now
+        // const waveFreq = 1 + (soundFrequency * 5); // Unused for now
 
         // Rotate the whole particle system for base movement
         particlesRef.current.rotation.y += targetSpeed * (1 + soundFrequency);

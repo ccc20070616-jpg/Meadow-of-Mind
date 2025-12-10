@@ -16,6 +16,12 @@ const App: React.FC = () => {
     soundFrequency: 0,
   });
 
+  // Track status in a ref for access inside camera callbacks
+  const statusRef = useRef<AppStatus>(AppStatus.IDLE);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
   const videoRef = useRef<HTMLVideoElement>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const analyserRef = useRef<AnalyserNode | null>(null);
@@ -119,6 +125,7 @@ const App: React.FC = () => {
 
   // --- Logic: Audio Analysis Loop ---
   useEffect(() => {
+    // Only run analysis loop when running
     if (status !== AppStatus.RUNNING) return;
 
     const interval = setInterval(() => {
@@ -184,6 +191,9 @@ const App: React.FC = () => {
 
         const camera = new CameraClass(videoRef.current, {
           onFrame: async () => {
+            // Check status ref to see if we should process the frame
+            if (statusRef.current !== AppStatus.RUNNING) return;
+
             if (videoRef.current && faceMeshRef.current) {
                await faceMeshRef.current.send({ image: videoRef.current });
             }
@@ -200,6 +210,23 @@ const App: React.FC = () => {
       console.error(e);
       setError(e.message || "Initialization failed");
       setStatus(AppStatus.ERROR);
+    }
+  };
+
+  // --- Logic: Toggle Pause ---
+  const togglePause = async () => {
+    if (status === AppStatus.RUNNING) {
+      // Pause
+      if (audioContextRef.current && audioContextRef.current.state === 'running') {
+        await audioContextRef.current.suspend();
+      }
+      setStatus(AppStatus.PAUSED);
+    } else if (status === AppStatus.PAUSED) {
+      // Resume
+      if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+        await audioContextRef.current.resume();
+      }
+      setStatus(AppStatus.RUNNING);
     }
   };
 
@@ -221,7 +248,7 @@ const App: React.FC = () => {
       <video
         ref={videoRef}
         className={`absolute bottom-6 right-6 w-48 sm:w-64 aspect-video object-cover rounded-xl border-2 border-white/10 shadow-[0_0_30px_rgba(0,0,0,0.6)] z-30 transition-all duration-700 ${
-            status === AppStatus.RUNNING ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10 pointer-events-none'
+            status === AppStatus.RUNNING || status === AppStatus.PAUSED ? 'opacity-100 translate-y-0' : 'opacity-0 translate-y-10 pointer-events-none'
         }`}
         playsInline
         muted
@@ -229,12 +256,16 @@ const App: React.FC = () => {
       />
 
       {/* 3D Visualizer Background */}
-      <VisualizerCanvas systemStateRef={systemStateRef} />
+      <VisualizerCanvas 
+        systemStateRef={systemStateRef} 
+        isPaused={status === AppStatus.PAUSED}
+      />
 
       {/* UI Overlay */}
       <Overlay 
         status={status} 
         onStart={handleStart} 
+        onTogglePause={togglePause}
         error={error}
         systemState={uiState}
       />

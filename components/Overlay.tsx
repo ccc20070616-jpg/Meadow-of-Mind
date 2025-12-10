@@ -1,16 +1,18 @@
 import React from 'react';
-import { Activity, Mic, Smile, Frown, Volume2, Music, Loader2 } from 'lucide-react';
+import { Activity, Mic, Smile, Frown, Volume2, Music, Loader2, Pause, Play } from 'lucide-react';
 import { SystemState, AppStatus } from '../types';
 
 interface OverlayProps {
   status: AppStatus;
   systemState: SystemState;
   onStart: () => void;
+  onTogglePause: () => void;
   error?: string;
 }
 
-const Overlay: React.FC<OverlayProps> = ({ status, systemState, onStart, error }) => {
+const Overlay: React.FC<OverlayProps> = ({ status, systemState, onStart, onTogglePause, error }) => {
   const isRunning = status === AppStatus.RUNNING;
+  const isPaused = status === AppStatus.PAUSED;
 
   if (status === AppStatus.IDLE || status === AppStatus.READY) {
     return (
@@ -64,12 +66,28 @@ const Overlay: React.FC<OverlayProps> = ({ status, systemState, onStart, error }
     );
   }
 
+  if (isPaused) {
+    return (
+      <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm text-white">
+        <h2 className="text-3xl font-bold tracking-widest mb-6">PAUSED</h2>
+        <button 
+          onClick={onTogglePause}
+          className="p-6 bg-white/10 rounded-full hover:bg-white/20 hover:scale-110 transition-all border border-white/20 backdrop-blur-md"
+        >
+          <Play className="w-12 h-12 fill-current" />
+        </button>
+      </div>
+    );
+  }
+
   // Running State UI
   return (
-    <div className="absolute top-0 left-0 p-6 z-40 text-white w-full pointer-events-none">
-      <div className="flex justify-between items-start">
-        {/* Left: Stats */}
-        <div className="bg-black/40 backdrop-blur-md p-4 rounded-xl border border-white/10 space-y-3 w-64 shadow-xl">
+    <div className="absolute inset-0 pointer-events-none z-40">
+      {/* Top Bar Container */}
+      <div className="absolute top-0 left-0 w-full p-6 flex justify-between items-start">
+        
+        {/* Left: Stats Panel */}
+        <div className="bg-black/40 backdrop-blur-md p-4 rounded-xl border border-white/10 space-y-3 w-64 shadow-xl pointer-events-auto">
           <div className="flex items-center justify-between border-b border-white/10 pb-2 mb-2">
             <span className="text-xs font-bold uppercase tracking-wider text-gray-400">Real-time Analysis</span>
             <Activity className="w-4 h-4 text-green-400 animate-pulse" />
@@ -118,16 +136,30 @@ const Overlay: React.FC<OverlayProps> = ({ status, systemState, onStart, error }
           </div>
         </div>
 
-        {/* Right: Controls Hint */}
-        <div className="hidden md:block bg-black/40 backdrop-blur-md px-4 py-2 rounded-full border border-white/10 text-xs text-gray-400">
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-            <span>Tracking Active</span>
-            <span className="w-px h-3 bg-white/20 mx-1" />
-            <Mic className="w-3 h-3" />
-            <span>Audio Reactive</span>
+        {/* Right: Controls & Info */}
+        <div className="flex flex-col items-end gap-4 pointer-events-auto">
+          
+          {/* Pause Button */}
+          <button 
+            onClick={onTogglePause}
+            className="p-3 bg-white/10 hover:bg-white/20 rounded-full backdrop-blur-md border border-white/10 transition-all active:scale-95 group"
+            title="Pause Experience"
+          >
+            <Pause className="w-6 h-6 text-white group-hover:text-orange-400 transition-colors" />
+          </button>
+
+          {/* Controls Hint */}
+          <div className="hidden md:block bg-black/40 backdrop-blur-md px-4 py-2 rounded-full border border-white/10 text-xs text-gray-400">
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              <span>Tracking Active</span>
+              <span className="w-px h-3 bg-white/20 mx-1" />
+              <Mic className="w-3 h-3" />
+              <span>Audio Reactive</span>
+            </div>
           </div>
         </div>
+
       </div>
     </div>
   );
