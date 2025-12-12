@@ -6,9 +6,9 @@ export const CONFIG: VisualizerConfig = {
   particleRadius: 3.0,
   
   // Nature / Healing Colors
-  happyColor: 0xB0D66B, // Lighter, more realistic Yellow-Green (was 0x66FF66)
-  calmColor: 0xE6C229,  // Golden Hour / Warm Wheat
-  sadColor: 0x4A6B8A,   // Stormy Blue-Grey
+  happyColor: 0xD4DE8D, // Spring: Yellow-green, lower saturation (was 0xB0D66B)
+  calmColor: 0xE6C229,  // Autumn: Golden Hour / Warm Wheat
+  sadColor: 0xBBDDFF,   // Winter: Brighter, Icy Blue/White (was 0x4A6B8A)
 
   happySpeed: 0.02,
   sadSpeed: 0.05,

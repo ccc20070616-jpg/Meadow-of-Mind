@@ -1,13 +1,32 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Overlay from './components/Overlay';
 import VisualizerCanvas from './components/VisualizerCanvas';
-import { AppStatus, SystemState, Emotion } from './types';
+import { AppStatus, SystemState, Emotion, StoreItem } from './types';
 import { CONFIG } from './constants';
+
+// Initial Store Data
+const INITIAL_STORE_ITEMS: StoreItem[] = [
+  // Skins
+  { id: 'skin_default', name: '光之球', type: 'skin', cost: 0, unlocked: true, active: true, description: '最纯粹的光芒形态。' },
+  { id: 'skin_cube', name: '量子立方', type: 'skin', cost: 50, unlocked: false, active: false, description: '来自数字维度的几何体。' },
+  { id: 'skin_tetra', name: '以太棱镜', type: 'skin', cost: 120, unlocked: false, active: false, description: '能够折射情绪的古代遗物。' },
+  
+  // Companions
+  { id: 'comp_butterfly', name: '蓝闪蝶', type: 'companion', cost: 0, unlocked: true, active: true, description: '象征希望的忠实伙伴。' },
+  { id: 'comp_firefly', name: '余烬萤火', type: 'companion', cost: 80, unlocked: false, active: false, description: '曾在风暴中幸存的微光。' },
+  { id: 'comp_spirit', name: '森林之灵', type: 'companion', cost: 200, unlocked: false, active: false, description: '古老草甸的守护者。' },
+];
 
 const App: React.FC = () => {
   const [status, setStatus] = useState<AppStatus>(AppStatus.IDLE);
   const [error, setError] = useState<string>('');
+  const [gameKey, setGameKey] = useState(0); // Used to reset canvas on restart
   
+  // Game State
+  const [xp, setXp] = useState<number>(0);
+  const [storeItems, setStoreItems] = useState<StoreItem[]>(INITIAL_STORE_ITEMS);
+  const [isShopOpen, setIsShopOpen] = useState(false);
+
   // Refs for mutable data
   const systemStateRef = useRef<SystemState>({
     emotion: Emotion.CALM,
@@ -16,6 +35,7 @@ const App: React.FC = () => {
     soundAmplitude: 0,
     soundFrequency: 0,
     handPosition: { x: 0, y: 0 },
+    handSize: 0.1, // Default neutral size
     isFist: false,
   });
 
@@ -62,24 +82,42 @@ const App: React.FC = () => {
       hands.onResults((results: any) => {
         if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
           const landmarks = results.multiHandLandmarks[0];
+          // Safety check: Ensure we have enough landmarks
+          if (!landmarks || landmarks.length < 21) return;
+
           const palmCenter = landmarks[9]; 
           const wrist = landmarks[0];
+
+          // Strict null check for landmarks
+          if (!palmCenter || !wrist) return;
 
           // Normalized position (Mirror X)
           const x = (1 - palmCenter.x) * 2 - 1; 
           const y = -(palmCenter.y) * 2 + 1;
+          
+          // Hand Size (Depth estimation)
+          // Distance between Wrist (0) and Middle Finger MCP (9)
+          const handSize = Math.hypot(palmCenter.x - wrist.x, palmCenter.y - wrist.y);
 
           // Fist Detection
           // Check tip distance to MCP (Index 9)
           let tipToMcpDist = 0;
           [8, 12, 16, 20].forEach(idx => {
              const tip = landmarks[idx];
-             tipToMcpDist += Math.hypot(tip.x - palmCenter.x, tip.y - palmCenter.y);
+             if (tip) {
+                tipToMcpDist += Math.hypot(tip.x - palmCenter.x, tip.y - palmCenter.y);
+             }
           });
           const isFist = tipToMcpDist < 0.35; 
 
           systemStateRef.current.handPosition = { x, y };
+          systemStateRef.current.handSize = handSize;
           systemStateRef.current.isFist = isFist;
+        } else {
+            // Reset to neutral if no hand detected
+            systemStateRef.current.handPosition = { x: 0, y: 0 };
+            systemStateRef.current.handSize = 0.12; // Neutral
+            systemStateRef.current.isFist = false;
         }
       });
       handsRef.current = hands;
@@ -97,6 +135,7 @@ const App: React.FC = () => {
       faceMesh.onResults((results: any) => {
         if (results.multiFaceLandmarks && results.multiFaceLandmarks.length > 0) {
           const landmarks = results.multiFaceLandmarks[0];
+          if (!landmarks) return;
 
           // Indices:
           // 61: Left Mouth Corner
@@ -107,6 +146,9 @@ const App: React.FC = () => {
           const rightCorner = landmarks[291];
           const upperLip = landmarks[13];
           const lowerLip = landmarks[14];
+
+          // Strict check to prevent undefined errors
+          if (!leftCorner || !rightCorner || !upperLip || !lowerLip) return;
 
           // 1. Calculate Mouth Width (for Normalization)
           const width = Math.hypot(rightCorner.x - leftCorner.x, rightCorner.y - leftCorner.y);
@@ -198,7 +240,7 @@ const App: React.FC = () => {
       windFilterRef.current = windFilter;
 
       const windGain = ctx.createGain();
-      windGain.gain.value = 0.8;
+      windGain.gain.value = 0.8; // Restored to 0.8 as BGM is removed
       windGainRef.current = windGain;
 
       noiseNode.connect(windFilter);
@@ -266,14 +308,22 @@ const App: React.FC = () => {
 
   // --- Logic: Start Sequence ---
   const handleStart = async () => {
+    // If we are restarting from GAME_OVER, reset the game
+    if (status === AppStatus.GAME_OVER) {
+       setGameKey(k => k + 1); // Force canvas remount
+    }
+
     setStatus(AppStatus.LOADING);
     setError('');
 
     try {
-      await initAudio(); 
-      await initTracking();
+      // Only init audio/tracking if not already done
+      if (!audioContextRef.current) await initAudio(); 
+      else if (audioContextRef.current.state === 'suspended') await audioContextRef.current.resume();
 
-      if (videoRef.current && handsRef.current && faceMeshRef.current) {
+      if (!handsRef.current) await initTracking();
+
+      if (videoRef.current && handsRef.current && faceMeshRef.current && !cameraRef.current) {
         const CameraClass = (window as any).Camera || (window as any).mediapipe?.camera_utils?.Camera;
         const camera = new CameraClass(videoRef.current, {
           onFrame: async () => {
@@ -299,6 +349,13 @@ const App: React.FC = () => {
       setStatus(AppStatus.ERROR);
     }
   };
+  
+  const handleGameOver = () => {
+      setStatus(AppStatus.GAME_OVER);
+      if (audioContextRef.current) {
+          audioContextRef.current.suspend();
+      }
+  };
 
   const togglePause = async () => {
     if (status === AppStatus.RUNNING) {
@@ -309,6 +366,105 @@ const App: React.FC = () => {
       setStatus(AppStatus.RUNNING);
     }
   };
+
+  // --- XP & Shop Logic ---
+  const handleCollectShard = () => {
+    setXp(prev => prev + 50);
+
+    // Play Sound FX (Sparkle/Ding)
+    const ctx = audioContextRef.current;
+    if (ctx && ctx.state === 'running') {
+        const t = ctx.currentTime;
+        
+        // Main tone
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        
+        osc.connect(gain);
+        // Connect to master gain if available, otherwise destination
+        gain.connect(masterGainRef.current || ctx.destination);
+        
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(880, t); // A5
+        osc.frequency.exponentialRampToValueAtTime(1760, t + 0.1); // Jump up octave
+        
+        gain.gain.setValueAtTime(0.3, t);
+        gain.gain.exponentialRampToValueAtTime(0.01, t + 0.4);
+        
+        osc.start(t);
+        osc.stop(t + 0.4);
+
+        // Secondary harmonic (sparkle)
+        const osc2 = ctx.createOscillator();
+        const gain2 = ctx.createGain();
+        osc2.connect(gain2);
+        gain2.connect(masterGainRef.current || ctx.destination);
+        
+        osc2.type = 'triangle';
+        osc2.frequency.setValueAtTime(2200, t);
+        osc2.frequency.linearRampToValueAtTime(4000, t + 0.1);
+        
+        gain2.gain.setValueAtTime(0.1, t);
+        gain2.gain.exponentialRampToValueAtTime(0.01, t + 0.2);
+        
+        osc2.start(t);
+        osc2.stop(t + 0.2);
+    }
+  };
+
+  const handlePurchase = (item: StoreItem) => {
+    if (xp >= item.cost && !item.unlocked) {
+      setXp(prev => prev - item.cost);
+      setStoreItems(prev => prev.map(i => i.id === item.id ? { ...i, unlocked: true } : i));
+
+      // Play Purchase Sound (Success Chord)
+      const ctx = audioContextRef.current;
+      if (ctx && ctx.state === 'running') {
+          const t = ctx.currentTime;
+          const destination = masterGainRef.current || ctx.destination;
+
+          // Major Triad Arpeggio (C6, E6, G6)
+          [1046.50, 1318.51, 1567.98].forEach((freq, index) => {
+             const osc = ctx.createOscillator();
+             const gain = ctx.createGain();
+             
+             osc.type = 'sine';
+             osc.frequency.value = freq;
+             
+             osc.connect(gain);
+             gain.connect(destination);
+             
+             const startTime = t + index * 0.06; // Staggered start
+             const duration = 0.3;
+             
+             gain.gain.setValueAtTime(0, startTime);
+             gain.gain.linearRampToValueAtTime(0.15, startTime + 0.02);
+             gain.gain.exponentialRampToValueAtTime(0.001, startTime + duration);
+             
+             osc.start(startTime);
+             osc.stop(startTime + duration);
+          });
+      }
+    }
+  };
+
+  const handleEquip = (item: StoreItem) => {
+    if (!item.unlocked) return;
+    setStoreItems(prev => prev.map(i => {
+      // If equipping a skin, unequip other skins
+      if (item.type === 'skin' && i.type === 'skin') {
+        return { ...i, active: i.id === item.id };
+      }
+      // If equipping a companion, unequip other companions
+      if (item.type === 'companion' && i.type === 'companion') {
+        return { ...i, active: i.id === item.id };
+      }
+      return i;
+    }));
+  };
+
+  const activeSkin = storeItems.find(i => i.type === 'skin' && i.active)?.id || 'skin_default';
+  const activeCompanion = storeItems.find(i => i.type === 'companion' && i.active)?.id || 'comp_butterfly';
 
   const [uiState, setUiState] = useState<SystemState>(systemStateRef.current);
   useEffect(() => {
@@ -331,8 +487,13 @@ const App: React.FC = () => {
       />
       
       <VisualizerCanvas 
+        key={gameKey} // Force reset on restart
         systemStateRef={systemStateRef} 
         isPaused={status === AppStatus.PAUSED}
+        onCollectShard={handleCollectShard}
+        activeSkin={activeSkin}
+        activeCompanion={activeCompanion}
+        onGameOver={handleGameOver}
       />
       
       <Overlay 
@@ -341,6 +502,13 @@ const App: React.FC = () => {
         onTogglePause={togglePause}
         error={error}
         systemState={uiState}
+        xp={xp}
+        storeItems={storeItems}
+        isShopOpen={isShopOpen}
+        onOpenShop={() => setIsShopOpen(true)}
+        onCloseShop={() => setIsShopOpen(false)}
+        onPurchase={handlePurchase}
+        onEquip={handleEquip}
       />
     </div>
   );

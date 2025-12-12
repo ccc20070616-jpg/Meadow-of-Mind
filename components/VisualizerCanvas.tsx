@@ -6,14 +6,18 @@ import { SystemState, Emotion } from '../types';
 interface VisualizerCanvasProps {
   systemStateRef: React.MutableRefObject<SystemState>;
   isPaused: boolean;
+  onCollectShard: () => void;
+  activeSkin: string;
+  activeCompanion: string;
+  onGameOver: () => void;
 }
 
 // --- Constants for Optimization ---
-const WORLD_EXTENT = 5000; // Increased map size significantly (-5000 to 5000)
-const CHUNK_SIZE = 500;
+const GAME_OVER_RADIUS = 8000; 
+const WORLD_EXTENT = 60000; 
+const CHUNK_SIZE = 2000; 
 const TOTAL_CHUNKS_SIDE = (WORLD_EXTENT * 2) / CHUNK_SIZE; 
-// Fixed density per chunk to ensure lush grass regardless of map size
-const INSTANCES_PER_CHUNK = 2000; 
+const INSTANCES_PER_CHUNK = 5000; 
 
 // --- Shaders ---
 
@@ -105,7 +109,7 @@ const GRASS_FRAGMENT_SHADER = `
     
     // Distance fog (Matches scene fog)
     float dist = length(vWorldPosition.xz - cameraPosition.xz);
-    float fogFactor = smoothstep(500.0, 2500.0, dist); // Increased fog distance for larger world
+    float fogFactor = smoothstep(500.0, 25000.0, dist); 
     gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.05, 0.05, 0.08), fogFactor);
   }
 `;
@@ -157,7 +161,8 @@ const WEATHER_FRAGMENT_SHADER = `
     float r = length(uv);
     if (r > 0.5) discard;
     
-    float glow = 1.0 - smoothstep(0.3, 0.5, r);
+    // Sharper circle for ice crystals
+    float glow = 1.0 - smoothstep(0.4, 0.5, r);
     gl_FragColor = vec4(uColor, vAlpha * glow * 0.8);
   }
 `;
@@ -188,29 +193,63 @@ const SUN_FRAGMENT_SHADER = `
   }
 `;
 
+// --- Boundary Ring Shader ---
+const BOUNDARY_VERTEX_SHADER = `
+  varying vec2 vUv;
+  void main() {
+    vUv = uv;
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+  }
+`;
+const BOUNDARY_FRAGMENT_SHADER = `
+  varying vec2 vUv;
+  uniform float uTime;
+  void main() {
+    // Ring effect
+    vec2 center = vec2(0.5, 0.5);
+    float dist = distance(vUv, center);
+    float ring = smoothstep(0.48, 0.5, dist) * smoothstep(0.52, 0.5, dist);
+    
+    float glow = sin(uTime * 2.0) * 0.5 + 0.5;
+    gl_FragColor = vec4(1.0, 0.2, 0.2, ring * glow * 0.5);
+  }
+`;
 
-const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isPaused }) => {
+const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ 
+  systemStateRef, 
+  isPaused,
+  onCollectShard,
+  activeSkin,
+  activeCompanion,
+  onGameOver
+}) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const materialRef = useRef<THREE.ShaderMaterial | null>(null);
   const weatherMatRef = useRef<THREE.ShaderMaterial | null>(null);
-  const playerRef = useRef<THREE.Mesh | null>(null);
+  const playerRef = useRef<THREE.Group | null>(null);
   const weatherSystemRef = useRef<THREE.Points | null>(null);
+  const groundRef = useRef<THREE.Mesh | null>(null);
   
-  // New Refs for Sun and Butterfly
   const sunHaloMatRef = useRef<THREE.ShaderMaterial | null>(null);
-  const butterflyGroupRef = useRef<THREE.Group | null>(null);
-  const leftWingRef = useRef<THREE.Mesh | null>(null);
-  const rightWingRef = useRef<THREE.Mesh | null>(null);
+  const companionGroupRef = useRef<THREE.Group | null>(null);
   
-  // LOD Management
+  const shardsRef = useRef<THREE.Mesh[]>([]);
+  const shardGroupRef = useRef<THREE.Group | null>(null);
+  
+  const chunksRef = useRef<THREE.LOD[]>([]);
+  const boundaryRingRef = useRef<THREE.Mesh | null>(null);
+  
   const lodsRef = useRef<THREE.LOD[]>([]);
   
   const frameIdRef = useRef<number>(0);
   const timeRef = useRef<number>(0);
   const isPausedRef = useRef(isPaused);
+  
+  const activeSkinRef = useRef(activeSkin);
+  const activeCompanionRef = useRef(activeCompanion);
   
   // Physics State
   const playerVelocity = useRef(new THREE.Vector2(0, 0));
@@ -227,6 +266,100 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
   useEffect(() => {
     isPausedRef.current = isPaused;
   }, [isPaused]);
+  
+  useEffect(() => {
+    activeSkinRef.current = activeSkin;
+    activeCompanionRef.current = activeCompanion;
+    if (sceneRef.current && playerRef.current) updatePlayerMesh();
+    if (sceneRef.current && companionGroupRef.current) updateCompanionMesh();
+  }, [activeSkin, activeCompanion]);
+
+  const updatePlayerMesh = () => {
+     if (!playerRef.current) return;
+     const oldMesh = playerRef.current.children.find(c => c instanceof THREE.Mesh);
+     if (oldMesh) playerRef.current.remove(oldMesh);
+     
+     let geometry: THREE.BufferGeometry;
+     let material: THREE.Material;
+     
+     switch(activeSkinRef.current) {
+         case 'skin_cube':
+             geometry = new THREE.BoxGeometry(4, 4, 4);
+             material = new THREE.MeshStandardMaterial({ 
+                 color: 0x00ffff, 
+                 emissive: 0x0088aa, 
+                 roughness: 0.2,
+                 metalness: 0.8
+             });
+             break;
+         case 'skin_tetra':
+             geometry = new THREE.TetrahedronGeometry(3.5);
+             material = new THREE.MeshPhysicalMaterial({ 
+                 color: 0xffccff, 
+                 transmission: 0.5,
+                 opacity: 0.8,
+                 transparent: true,
+                 roughness: 0,
+                 ior: 1.5,
+                 thickness: 2.0
+             });
+             break;
+         case 'skin_default':
+         default:
+             geometry = new THREE.SphereGeometry(2.5, 32, 32);
+             material = new THREE.MeshBasicMaterial({ color: 0xffffee });
+             break;
+     }
+     
+     const mesh = new THREE.Mesh(geometry, material);
+     playerRef.current.add(mesh);
+  };
+  
+  const updateCompanionMesh = () => {
+      if (!companionGroupRef.current) return;
+      while(companionGroupRef.current.children.length > 0){ 
+          companionGroupRef.current.remove(companionGroupRef.current.children[0]); 
+      }
+      const type = activeCompanionRef.current;
+      if (type === 'comp_firefly') {
+          const geometry = new THREE.SphereGeometry(0.5, 8, 8);
+          const material = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+          const mesh = new THREE.Mesh(geometry, material);
+          const light = new THREE.PointLight(0xffaa00, 1.5, 30);
+          companionGroupRef.current.add(mesh);
+          companionGroupRef.current.add(light);
+      } else if (type === 'comp_spirit') {
+          const geometry = new THREE.DodecahedronGeometry(1.2, 0);
+          const material = new THREE.MeshBasicMaterial({ 
+              color: 0xccffff, 
+              transparent: true, 
+              opacity: 0.6,
+              blending: THREE.AdditiveBlending 
+          });
+          const mesh = new THREE.Mesh(geometry, material);
+          const light = new THREE.PointLight(0xccffff, 1.0, 40);
+          companionGroupRef.current.add(mesh);
+          companionGroupRef.current.add(light);
+      } else {
+          const wingGeo = new THREE.CircleGeometry(0.8, 8, 0, Math.PI);
+          const wingMat = new THREE.MeshBasicMaterial({ 
+            color: 0x88CCFF, 
+            side: THREE.DoubleSide,
+            transparent: true,
+            opacity: 0.9
+          });
+          const lWing = new THREE.Mesh(wingGeo, wingMat);
+          lWing.rotation.z = Math.PI / 2; lWing.rotation.x = Math.PI / 2;
+          lWing.position.set(-0.1, 0, 0); lWing.geometry.translate(0, 0.4, 0); 
+          const rWing = new THREE.Mesh(wingGeo, wingMat);
+          rWing.rotation.z = -Math.PI / 2; rWing.rotation.x = Math.PI / 2;
+          rWing.position.set(0.1, 0, 0); rWing.geometry.translate(0, 0.4, 0);
+          companionGroupRef.current.add(lWing);
+          companionGroupRef.current.add(rWing);
+          const butterflyLight = new THREE.PointLight(0x0088ff, 0.8, 20);
+          companionGroupRef.current.add(butterflyLight);
+      }
+  };
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -234,15 +367,12 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
     // --- Init Scene ---
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x050508);
-    // Increased fog range for larger world
-    scene.fog = new THREE.Fog(0x050508, 500, 2500); 
+    scene.fog = new THREE.Fog(0x050508, 1000, 25000); 
     sceneRef.current = scene;
 
-    // --- Init Camera ---
-    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 6000);
+    const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 30000);
     cameraRef.current = camera;
 
-    // --- Init Renderer ---
     const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
@@ -253,26 +383,23 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
     containerRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
-    // --- Lighting ---
     const ambientLight = new THREE.AmbientLight(0xffffff, 0.2);
     scene.add(ambientLight);
 
     const sunPos = new THREE.Vector3(100, 300, -100);
-    const sunLight = new THREE.DirectionalLight(0xffaa33, 1.5);
+    const sunLight = new THREE.DirectionalLight(0xffaa33, 1.2); 
     sunLight.position.copy(sunPos);
     sunLight.castShadow = true;
-    // Increase shadow map coverage for larger area
     sunLight.shadow.mapSize.width = 4096;
     sunLight.shadow.mapSize.height = 4096;
     sunLight.shadow.camera.near = 0.5;
-    sunLight.shadow.camera.far = 3000;
-    sunLight.shadow.camera.left = -2000;
-    sunLight.shadow.camera.right = 2000;
-    sunLight.shadow.camera.top = 2000;
-    sunLight.shadow.camera.bottom = -2000;
+    sunLight.shadow.camera.far = 4000;
+    sunLight.shadow.camera.left = -3000;
+    sunLight.shadow.camera.right = 3000;
+    sunLight.shadow.camera.top = 3000;
+    sunLight.shadow.camera.bottom = -3000;
     scene.add(sunLight);
 
-    // --- Sun Halo (Visual Only) ---
     const sunHaloGeo = new THREE.PlaneGeometry(300, 300);
     const sunHaloMat = new THREE.ShaderMaterial({
       vertexShader: SUN_VERTEX_SHADER,
@@ -288,66 +415,45 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
     sunHaloMatRef.current = sunHaloMat;
     const sunHalo = new THREE.Mesh(sunHaloGeo, sunHaloMat);
     sunHalo.position.copy(sunPos);
-    sunHalo.lookAt(camera.position); // Initially look at camera
+    sunHalo.lookAt(camera.position); 
     scene.add(sunHalo);
 
-    // --- Butterfly Companion ---
-    const butterflyGroup = new THREE.Group();
-    
-    // Wings geometry (Semi-circle)
-    const wingGeo = new THREE.CircleGeometry(0.8, 8, 0, Math.PI);
-    const wingMat = new THREE.MeshBasicMaterial({ 
-      color: 0x88CCFF, // Light Blue
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.9
-    });
+    const compGroup = new THREE.Group();
+    scene.add(compGroup);
+    companionGroupRef.current = compGroup;
+    updateCompanionMesh(); 
 
-    const lWing = new THREE.Mesh(wingGeo, wingMat);
-    lWing.rotation.z = Math.PI / 2; // Orient upright
-    lWing.rotation.x = Math.PI / 2; // Flat
-    lWing.position.set(-0.1, 0, 0); // Offset from center
-    // Adjust pivot visual
-    lWing.geometry.translate(0, 0.4, 0); 
-
-    const rWing = new THREE.Mesh(wingGeo, wingMat);
-    rWing.rotation.z = -Math.PI / 2;
-    rWing.rotation.x = Math.PI / 2;
-    rWing.position.set(0.1, 0, 0);
-    rWing.geometry.translate(0, 0.4, 0);
-
-    butterflyGroup.add(lWing);
-    butterflyGroup.add(rWing);
-    
-    // Add a tiny glow light to the butterfly
-    const butterflyLight = new THREE.PointLight(0x0088ff, 0.8, 20);
-    butterflyGroup.add(butterflyLight);
-
-    scene.add(butterflyGroup);
-    
-    butterflyGroupRef.current = butterflyGroup;
-    leftWingRef.current = lWing;
-    rightWingRef.current = rWing;
-
-    // --- Ground Plane ---
-    // Make ground huge to cover the new extent
-    // Changed color from 0x051005 to 0x0c1e0c (slightly lighter natural dark green)
-    const groundGeo = new THREE.PlaneGeometry(12000, 12000);
+    const groundGeo = new THREE.PlaneGeometry(120000, 120000);
     const groundMat = new THREE.MeshStandardMaterial({ color: 0x0c1e0c, roughness: 1, metalness: 0 });
     const ground = new THREE.Mesh(groundGeo, groundMat);
     ground.rotation.x = -Math.PI / 2;
     ground.receiveShadow = true;
     scene.add(ground);
+    groundRef.current = ground;
 
-    // --- Grass Setup (LOD System) ---
+    // --- Boundary Ring ---
+    const boundaryGeo = new THREE.PlaneGeometry(GAME_OVER_RADIUS * 2, GAME_OVER_RADIUS * 2);
+    const boundaryMat = new THREE.ShaderMaterial({
+        vertexShader: BOUNDARY_VERTEX_SHADER,
+        fragmentShader: BOUNDARY_FRAGMENT_SHADER,
+        uniforms: { uTime: { value: 0 } },
+        transparent: true,
+        side: THREE.DoubleSide,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending
+    });
+    const boundary = new THREE.Mesh(boundaryGeo, boundaryMat);
+    boundary.rotation.x = -Math.PI / 2;
+    boundary.position.y = 5;
+    scene.add(boundary);
+    boundaryRingRef.current = boundary;
+
+    // --- Grass Setup (Infinite Pool System) ---
     const bladeWidth = 0.7;
     const bladeHeight = 4.5;
     
-    // High Detail: 3 vertical segments
     const grassGeoHigh = new THREE.PlaneGeometry(bladeWidth, bladeHeight, 1, 3);
     grassGeoHigh.translate(0, bladeHeight / 2, 0); 
-
-    // Low Detail: 1 vertical segment (Reduced vertex count)
     const grassGeoLow = new THREE.PlaneGeometry(bladeWidth, bladeHeight, 1, 1);
     grassGeoLow.translate(0, bladeHeight / 2, 0);
 
@@ -358,76 +464,59 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
         uTime: { value: 0 },
         uWindStrength: { value: 1.0 },
         uPlayerPosition: { value: new THREE.Vector3(0, 0, 0) },
-        uBaseColor: { value: new THREE.Color(0x2a5a2a) }, // Initial Base Color
-        uTipColor: { value: new THREE.Color(0xB0D66B) }, // Initial Tip Color
+        uBaseColor: { value: new THREE.Color(0x0a3a0a) }, 
+        uTipColor: { value: new THREE.Color(0xB0D66B) }, 
         uSunPosition: { value: sunLight.position },
       },
       side: THREE.DoubleSide,
     });
     materialRef.current = grassMat;
 
-    // --- Chunk Generation ---
+    // --- Chunk Generation (Pool) ---
     const chunks: THREE.LOD[] = [];
     const dummy = new THREE.Object3D();
 
-    // Iterate over grid
     const halfGrid = TOTAL_CHUNKS_SIDE / 2;
-    
     for (let x = -halfGrid; x < halfGrid; x++) {
       for (let z = -halfGrid; z < halfGrid; z++) {
         const lod = new THREE.LOD();
         
-        // Calculate Chunk Center
         const centerX = x * CHUNK_SIZE + CHUNK_SIZE / 2;
         const centerZ = z * CHUNK_SIZE + CHUNK_SIZE / 2;
         
         lod.position.set(centerX, 0, centerZ);
 
-        // --- Level 0: High Detail ---
         const meshHigh = new THREE.InstancedMesh(grassGeoHigh, grassMat, INSTANCES_PER_CHUNK);
         meshHigh.castShadow = true;
         meshHigh.receiveShadow = true;
 
-        // --- Level 1: Low Detail ---
         const meshLow = new THREE.InstancedMesh(grassGeoLow, grassMat, INSTANCES_PER_CHUNK);
         meshLow.castShadow = false; 
         meshLow.receiveShadow = true;
 
-        // Populate Instances (Relative to Chunk Center)
-        for (let i = 0; i < INSTANCES_PER_CHUNK; i++) {
-          // Random pos within chunk size
+        for (let j = 0; j < INSTANCES_PER_CHUNK; j++) {
           const px = (Math.random() - 0.5) * CHUNK_SIZE;
           const pz = (Math.random() - 0.5) * CHUNK_SIZE;
-          
           dummy.position.set(px, 0, pz);
           dummy.rotation.y = Math.random() * Math.PI;
-          
-          // Random scale
           const scale = 0.8 + Math.random() * 0.7;
           dummy.scale.set(scale, scale, scale);
-          
           dummy.updateMatrix();
-          
-          meshHigh.setMatrixAt(i, dummy.matrix);
-          meshLow.setMatrixAt(i, dummy.matrix);
+          meshHigh.setMatrixAt(j, dummy.matrix);
+          meshLow.setMatrixAt(j, dummy.matrix);
         }
-
         meshHigh.instanceMatrix.needsUpdate = true;
         meshLow.instanceMatrix.needsUpdate = true;
-        
-        // Add levels to LOD
         lod.addLevel(meshHigh, 0);
-        lod.addLevel(meshLow, 800); // Push low detail distance slightly further
-
+        lod.addLevel(meshLow, 2000); 
         lod.autoUpdate = false; 
-        
         scene.add(lod);
         chunks.push(lod);
       }
     }
+    chunksRef.current = chunks;
     lodsRef.current = chunks;
 
-    // --- Weather System ---
     const weatherCount = 2000;
     const weatherGeo = new THREE.BufferGeometry();
     const weatherPos = [];
@@ -464,17 +553,47 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
     scene.add(weatherSystem);
     weatherSystemRef.current = weatherSystem;
 
-    // --- The Player (Orb) ---
-    const orbGeo = new THREE.SphereGeometry(2.5, 32, 32);
-    const orbMat = new THREE.MeshBasicMaterial({ color: 0xffffee });
-    const orb = new THREE.Mesh(orbGeo, orbMat);
-    scene.add(orb);
-    
-    const orbLight = new THREE.PointLight(0xffaa00, 2, 60);
-    orb.add(orbLight);
-    playerRef.current = orb;
+    const playerGroup = new THREE.Group();
+    scene.add(playerGroup);
+    playerRef.current = playerGroup;
+    const playerLight = new THREE.PointLight(0xffaa00, 2, 60);
+    playerGroup.add(playerLight);
+    updatePlayerMesh();
 
-    // --- Resize ---
+    const shardGeo = new THREE.OctahedronGeometry(2, 0);
+    const shardMat = new THREE.MeshBasicMaterial({ 
+        color: 0x00ffff, 
+        transparent: true, 
+        opacity: 0.8,
+        wireframe: true 
+    });
+    const shardGlowMat = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.4,
+        blending: THREE.AdditiveBlending
+    });
+    
+    const shardGroup = new THREE.Group();
+    const shards: THREE.Mesh[] = [];
+    
+    for(let i=0; i<150; i++) {
+        const mesh = new THREE.Mesh(shardGeo, shardMat);
+        const glow = new THREE.Mesh(shardGeo, shardGlowMat);
+        glow.scale.set(1.5, 1.5, 1.5);
+        mesh.add(glow);
+        mesh.position.set(
+            (Math.random() - 0.5) * 6000,
+            5 + Math.random() * 5,
+            (Math.random() - 0.5) * 6000
+        );
+        shardGroup.add(mesh);
+        shards.push(mesh);
+    }
+    scene.add(shardGroup);
+    shardGroupRef.current = shardGroup;
+    shardsRef.current = shards;
+
     const handleResize = () => {
       if (!cameraRef.current || !rendererRef.current) return;
       cameraRef.current.aspect = window.innerWidth / window.innerHeight;
@@ -491,49 +610,56 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
       const state = systemStateRef.current;
       timeRef.current += 0.01;
 
-      // 1. MOVEMENT LOGIC
-      const joyX = state.handPosition.x;
-      const joyY = state.handPosition.y; 
-      const dist = Math.sqrt(joyX * joyX + joyY * joyY);
-      const deadzone = 0.15;
-      
-      let speed = 0;
-      let turn = 0;
-
-      if (dist > deadzone) {
-          speed = (dist - deadzone) * 2.0; 
-          turn = joyX * 2.5;
+      // 1. GAME OVER CHECK
+      const distFromCenter = Math.sqrt(playerPosition.current.x**2 + playerPosition.current.z**2);
+      if (distFromCenter > GAME_OVER_RADIUS) {
+          onGameOver();
+          return; 
       }
 
-      const directionZ = state.isFist ? 1.0 : -1.0; 
-      
-      const targetVelX = turn;
-      const targetVelZ = speed * directionZ;
+      if (boundaryRingRef.current) {
+          (boundaryRingRef.current.material as THREE.ShaderMaterial).uniforms.uTime.value = timeRef.current;
+      }
 
-      playerVelocity.current.x = playerVelocity.current.x * 0.9 + targetVelX * 0.1;
-      playerVelocity.current.y = playerVelocity.current.y * 0.9 + targetVelZ * 0.1; 
+      // 2. MOVEMENT LOGIC
+      // Turn Logic (X position)
+      const joyX = state.handPosition.x;
+      const turn = joyX * 2.5;
+      
+      // Depth Logic (Hand Size)
+      const NEUTRAL_SIZE = 0.12; 
+      const SIZE_DEADZONE = 0.02;
+      
+      let speedZ = 0;
+      const sizeDiff = state.handSize - NEUTRAL_SIZE;
+      
+      // If hand is significantly different from neutral size, move
+      if (Math.abs(sizeDiff) > SIZE_DEADZONE) {
+          // If diff > 0 (Large/Close) -> Move Forward (Negative Z)
+          // If diff < 0 (Small/Far) -> Move Backward (Positive Z)
+          speedZ = -(sizeDiff * 25.0); 
+      }
+
+      playerVelocity.current.x = playerVelocity.current.x * 0.9 + turn * 0.1;
+      playerVelocity.current.y = playerVelocity.current.y * 0.9 + speedZ * 0.1; 
 
       const moveSpeed = 0.6; 
       playerPosition.current.x += playerVelocity.current.x * moveSpeed;
       playerPosition.current.z += playerVelocity.current.y * moveSpeed;
-
-      // Limit bounds (Updated for larger world)
-      const maxRange = WORLD_EXTENT - 100;
-      if (playerPosition.current.x > maxRange) playerPosition.current.x = maxRange;
-      if (playerPosition.current.x < -maxRange) playerPosition.current.x = -maxRange;
-      if (playerPosition.current.z > maxRange) playerPosition.current.z = maxRange;
-      if (playerPosition.current.z < -maxRange) playerPosition.current.z = -maxRange;
 
       const bobHeight = 6 + Math.sin(timeRef.current * 1.5) * 1.0;
       
       if (playerRef.current) {
         playerRef.current.position.set(playerPosition.current.x, bobHeight, playerPosition.current.z);
         
-        // Update Weather Position
         if (weatherSystemRef.current) {
             weatherSystemRef.current.position.x = playerPosition.current.x;
             weatherSystemRef.current.position.z = playerPosition.current.z;
             weatherSystemRef.current.position.y = 50; 
+        }
+
+        if (groundRef.current) {
+            groundRef.current.position.set(playerPosition.current.x, 0, playerPosition.current.z);
         }
 
         const offsetZ = 60;
@@ -552,46 +678,79 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
                 playerPosition.current.z - 20 
             );
             
-            // Update LODs manually
-            lodsRef.current.forEach(lod => lod.update(cameraRef.current!));
+            if (lodsRef.current) lodsRef.current.forEach(lod => lod.update(cameraRef.current!));
             
-            // Keep Sun Halo facing camera
             sunHalo.lookAt(cameraRef.current.position);
         }
         
-        // --- Butterfly Animation ---
-        if (butterflyGroupRef.current && leftWingRef.current && rightWingRef.current) {
-           const bf = butterflyGroupRef.current;
+        if (companionGroupRef.current) {
+           const bf = companionGroupRef.current;
+           const type = activeCompanionRef.current;
+           let hoverX, hoverY, hoverZ;
            
-           // Target position: slightly offset from player
-           // Use noise to make it hover/dance
-           const hoverX = Math.sin(timeRef.current * 1.2) * 5.0;
-           const hoverY = Math.cos(timeRef.current * 2.3) * 3.0 + 5.0; // Higher up
-           const hoverZ = Math.cos(timeRef.current * 0.8) * 5.0;
+           if (type === 'comp_firefly') {
+               hoverX = Math.sin(timeRef.current * 5.0) * 8.0;
+               hoverY = Math.cos(timeRef.current * 4.0) * 4.0 + 8.0;
+               hoverZ = Math.cos(timeRef.current * 6.0) * 8.0;
+           } else if (type === 'comp_spirit') {
+               hoverX = Math.sin(timeRef.current * 0.5) * 6.0;
+               hoverY = Math.cos(timeRef.current * 0.8) * 2.0 + 6.0;
+               hoverZ = Math.cos(timeRef.current * 0.4) * 6.0;
+           } else {
+               hoverX = Math.sin(timeRef.current * 1.2) * 5.0;
+               hoverY = Math.cos(timeRef.current * 2.3) * 3.0 + 5.0;
+               hoverZ = Math.cos(timeRef.current * 0.8) * 5.0;
+               
+               if (bf.children.length > 2) { 
+                   const flapSpeed = 15.0 + Math.sin(timeRef.current) * 5.0; 
+                   const flapAmp = 0.8;
+                   bf.children[0].rotation.y = Math.sin(timeRef.current * flapSpeed) * flapAmp;
+                   bf.children[1].rotation.y = -Math.sin(timeRef.current * flapSpeed) * flapAmp;
+               }
+           }
            
            const targetPos = new THREE.Vector3(
-             playerPosition.current.x + hoverX + 8, // Offset slightly right
+             playerPosition.current.x + hoverX + 8, 
              bobHeight + hoverY,
              playerPosition.current.z + hoverZ
            );
            
-           // Smooth follow
            bf.position.lerp(targetPos, 0.05);
-           
-           // Look at where it's going (approximate by target)
-           // Add a slight look ahead
            const lookTarget = targetPos.clone().add(new THREE.Vector3(hoverX, 0, hoverZ));
            bf.lookAt(lookTarget);
-           
-           // Flap wings
-           const flapSpeed = 15.0 + Math.sin(timeRef.current) * 5.0; // Variable speed
-           const flapAmp = 0.8;
-           leftWingRef.current.rotation.y = Math.sin(timeRef.current * flapSpeed) * flapAmp;
-           rightWingRef.current.rotation.y = -Math.sin(timeRef.current * flapSpeed) * flapAmp;
         }
       }
 
-      // 3. Atmosphere & Weather Targets
+      if (shardsRef.current.length > 0) {
+          for (let i = shardsRef.current.length - 1; i >= 0; i--) {
+              const shard = shardsRef.current[i];
+              shard.rotation.y += 0.02;
+              shard.rotation.x += 0.01;
+              shard.position.y = 5 + Math.sin(timeRef.current * 2 + i) * 1.5;
+              
+              const dx = shard.position.x - playerPosition.current.x;
+              const dz = shard.position.z - playerPosition.current.z;
+              const dist = Math.sqrt(dx*dx + dz*dz);
+              
+              if (dist < 10) { 
+                  shard.visible = false; 
+                  shard.position.set(
+                      playerPosition.current.x + (Math.random() - 0.5) * 2000,
+                      5,
+                      playerPosition.current.z + (Math.random() - 0.5) * 2000
+                  );
+                  shard.visible = true; 
+                  onCollectShard();
+              } else if (dist > 8000) { 
+                  shard.position.set(
+                      playerPosition.current.x + (Math.random() - 0.5) * 4000,
+                      5,
+                      playerPosition.current.z + (Math.random() - 0.5) * 4000
+                  );
+              }
+          }
+      }
+
       let targetBase = new THREE.Color(0x0a3a0a);
       let targetTip = new THREE.Color(0x88cc44);
       let sunColor = new THREE.Color(0xffaa33);
@@ -605,49 +764,37 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
       let targetHaloColor = new THREE.Color(0xffaa33);
 
       if (state.emotion === Emotion.CALM) {
-        // Autumn
         targetBase.setHex(0x1a2a0a);
         targetTip.setHex(CONFIG.calmColor);
         sunColor.setHex(0xffaa33);
-        
         targetWeatherColor.setHex(0xE6C229);
         targetWeatherSpeed = 6.0;
         targetWeatherSway = 2.0;
         targetWeatherSize = 5.0;
-        
-        // Gentle warm halo
         targetHaloOpacity = 0.4;
         targetHaloColor.setHex(0xffaa00);
       } else if (state.emotion === Emotion.HAPPY) {
-        // Summer
-        targetBase.setHex(0x2a5a2a); 
+        targetBase.setHex(0x1a2010); 
         targetTip.setHex(CONFIG.happyColor);
-        sunColor.setHex(0xffffcc);
-        
-        targetWeatherColor.setHex(0x88FF88); 
+        sunColor.setHex(0xffffdd);
+        targetWeatherColor.setHex(0xFFFFCC); 
         targetWeatherSpeed = 8.0;
         targetWeatherSway = 1.5;
         targetWeatherSize = 4.0;
-        
-        // Bright Halo for Spring/Summer
-        targetHaloOpacity = 0.8;
+        targetHaloOpacity = 0.6;
         targetHaloColor.setHex(0xfffee0);
       } else if (state.emotion === Emotion.SAD) {
-        // Winter
-        targetBase.setHex(0x05101a);
+        targetBase.setHex(0x223344); 
         targetTip.setHex(CONFIG.sadColor);
-        sunColor.setHex(0x8899aa);
-        
-        targetWeatherColor.setHex(0xDDDDFF); 
-        targetWeatherSpeed = 25.0;
-        targetWeatherSway = 0.5;
-        targetWeatherSize = 2.5;
-        
-        // No Halo
-        targetHaloOpacity = 0.0;
+        sunColor.setHex(0xFFEECC); 
+        targetWeatherColor.setHex(0xFFFFFF); 
+        targetWeatherSpeed = 20.0;
+        targetWeatherSway = 0.8;
+        targetWeatherSize = 2.5; 
+        targetHaloOpacity = 0.5;
+        targetHaloColor.setHex(0xFFDD88);
       }
 
-      // Update Grass Uniforms
       if (materialRef.current) {
         const windStrength = 0.5 + (state.soundAmplitude * 5.0);
         materialRef.current.uniforms.uTime.value = timeRef.current;
@@ -660,7 +807,6 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
       }
       sunLight.color.lerp(sunColor, 0.05);
       
-      // Update Weather Uniforms
       if (weatherMatRef.current) {
           currentWeather.current.color.lerp(targetWeatherColor, 0.05);
           currentWeather.current.speed += (targetWeatherSpeed - currentWeather.current.speed) * 0.05;
@@ -674,10 +820,8 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
           weatherMatRef.current.uniforms.uSize.value = currentWeather.current.size;
       }
       
-      // Update Sun Halo
       if (sunHaloMatRef.current) {
           sunHaloMatRef.current.uniforms.uColor.value.lerp(targetHaloColor, 0.05);
-          // Simple Lerp for float
           const curOp = sunHaloMatRef.current.uniforms.uOpacity.value;
           sunHaloMatRef.current.uniforms.uOpacity.value = curOp + (targetHaloOpacity - curOp) * 0.02;
       }
@@ -693,7 +837,6 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
       if (rendererRef.current && containerRef.current) {
         containerRef.current.removeChild(rendererRef.current.domElement);
       }
-      // Cleanup
       grassGeoHigh.dispose();
       grassGeoLow.dispose();
       grassMat.dispose();
@@ -701,10 +844,12 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({ systemStateRef, isP
       weatherMat.dispose();
       groundGeo.dispose();
       groundMat.dispose();
-      orbGeo.dispose();
-      orbMat.dispose();
       sunHaloGeo.dispose();
       sunHaloMat.dispose();
+      boundaryGeo.dispose();
+      boundaryMat.dispose();
+      shardGeo.dispose();
+      shardMat.dispose();
     };
   }, []);
 

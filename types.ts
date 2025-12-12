@@ -11,6 +11,7 @@ export interface SystemState {
   soundAmplitude: number;
   soundFrequency: number;
   handPosition: { x: number, y: number };
+  handSize: number; // New metric for depth control
   isFist: boolean;
 }
 
@@ -35,5 +36,18 @@ export enum AppStatus {
   READY = 'READY',
   RUNNING = 'RUNNING',
   PAUSED = 'PAUSED',
+  GAME_OVER = 'GAME_OVER',
   ERROR = 'ERROR'
+}
+
+export type ItemType = 'skin' | 'companion';
+
+export interface StoreItem {
+  id: string;
+  name: string;
+  type: ItemType;
+  cost: number;
+  unlocked: boolean;
+  active: boolean;
+  description: string;
 }
