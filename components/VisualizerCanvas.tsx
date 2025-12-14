@@ -13,11 +13,13 @@ interface VisualizerCanvasProps {
 }
 
 // --- Constants for Optimization ---
-const GAME_OVER_RADIUS = 8000; 
-const WORLD_EXTENT = 60000; 
+const GAME_OVER_RADIUS = 11350; 
+// Reduced extent to prevent Array Buffer Allocation errors (Memory Limit)
+const WORLD_EXTENT = 15000; 
 const CHUNK_SIZE = 2000; 
 const TOTAL_CHUNKS_SIDE = (WORLD_EXTENT * 2) / CHUNK_SIZE; 
-const INSTANCES_PER_CHUNK = 5000; 
+// Optimized density for performance while maintaining look via wider blades
+const INSTANCES_PER_CHUNK = 12000; 
 
 // --- Shaders ---
 
@@ -25,6 +27,7 @@ const GRASS_VERTEX_SHADER = `
   varying vec2 vUv;
   varying vec3 vColor;
   varying vec3 vWorldPosition;
+  varying vec3 vViewPosition; // Passed for specular/translucency calc
   
   uniform float uTime;
   uniform float uWindStrength;
@@ -86,7 +89,9 @@ const GRASS_VERTEX_SHADER = `
     vec3 mixedTip = mix(uTipColor, uTipColor * 1.2, variation);
     vColor = mix(mixedBase, mixedTip, heightPercent);
 
-    gl_Position = projectionMatrix * viewMatrix * worldPos;
+    vec4 mvPosition = viewMatrix * worldPos;
+    vViewPosition = -mvPosition.xyz;
+    gl_Position = projectionMatrix * mvPosition;
   }
 `;
 
@@ -98,18 +103,38 @@ const GRASS_FRAGMENT_SHADER = `
   uniform vec3 uSunPosition;
 
   void main() {
+    // Calculate Normal on the fly (Flat Shading for blades)
     vec3 normal = normalize(cross(dFdx(vWorldPosition), dFdy(vWorldPosition)));
     vec3 lightDir = normalize(uSunPosition - vWorldPosition);
+    vec3 viewDir = normalize(cameraPosition - vWorldPosition);
     
-    float diff = max(dot(normal, lightDir), 0.0);
-    // Simple ambient + diffuse
-    vec3 light = vColor * (diff * 0.6 + 0.4);
+    // 1. Basic Diffuse
+    // Using absolute dot product to light both sides of the blade evenly
+    float diff = abs(dot(normal, lightDir));
     
-    gl_FragColor = vec4(light, 1.0);
+    // 2. Translucency (Subsurface Scattering approximation)
+    // When looking towards the sun through the grass, it should glow
+    float transDot = max(0.0, dot(viewDir, -lightDir));
+    float translucency = pow(transDot, 3.0) * 0.8; // Power controls focus, Multiplier controls intensity
+    
+    // 3. Vertical Gradient & Ambient
+    // Grass is darker at the bottom (Ambient Occlusion) - implied by vColor mix in vertex, 
+    // but lets enhance shadow at bottom
+    // vColor is already mixed, but let's add base lighting
+    
+    vec3 ambient = vColor * 0.3;
+    vec3 diffuseColor = vColor * (diff * 0.5 + 0.2);
+    
+    // Add golden/bright tint to translucency
+    vec3 transColor = (vColor + vec3(0.2, 0.2, 0.0)) * translucency;
+    
+    vec3 finalColor = ambient + diffuseColor + transColor;
+    
+    gl_FragColor = vec4(finalColor, 1.0);
     
     // Distance fog (Matches scene fog)
     float dist = length(vWorldPosition.xz - cameraPosition.xz);
-    float fogFactor = smoothstep(500.0, 25000.0, dist); 
+    float fogFactor = smoothstep(500.0, 14000.0, dist); 
     gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(0.05, 0.05, 0.08), fogFactor);
   }
 `;
@@ -367,7 +392,8 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
     // --- Init Scene ---
     const scene = new THREE.Scene();
     scene.background = new THREE.Color(0x050508);
-    scene.fog = new THREE.Fog(0x050508, 1000, 25000); 
+    // Adjusted fog for new world extent
+    scene.fog = new THREE.Fog(0x050508, 1000, 14000); 
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 1, 30000);
@@ -449,7 +475,8 @@ const VisualizerCanvas: React.FC<VisualizerCanvasProps> = ({
     boundaryRingRef.current = boundary;
 
     // --- Grass Setup (Infinite Pool System) ---
-    const bladeWidth = 0.7;
+    // Increased blade width to keep it looking lush with fewer instances
+    const bladeWidth = 0.9; 
     const bladeHeight = 4.5;
     
     const grassGeoHigh = new THREE.PlaneGeometry(bladeWidth, bladeHeight, 1, 3);
